@@ -24,12 +24,26 @@ var path = require('path');
 
 var host = process.env.MEILI_HOST || 'localhost';
 var port = process.env.MEILI_PORT || '5432';
-var dbName = process.env.MEILI_DB_NAME || 'MEILISharable';
+var dbName = process.env.MEILI_DB_NAME || 'meili_db_two';
+var userName = 'meili_db_two';
+var password = 'meili_db_two';
 
-var connectionString =  process.env.MEILI_CONNECTION_STRING || 'postgres://postgres:postgres@'+host+':'+port+'/'+dbName;
+var config = {
+    host: host,
+    user: userName,
+    password: password,
+    database: dbName,
+    port: port, //env var: PGPORT
+    max: 10, // max number of clients in the pool
+    idleTimeoutMillis: 30000 // how long a client is allowed to remain idle before being closed
+};
+
+
+var connectionString =  process.env.MEILI_CONNECTION_STRING || 'postgres://'+userName+':'+password+'@'+host+':'+port+'/'+dbName;
 
 // reveal connection string to other components
-module.exports = connectionString;
+module.exports.connectionString = connectionString;
+module.exports.poolConfig = config;
 
 //try connection string
 var client = new pg.Client(connectionString);

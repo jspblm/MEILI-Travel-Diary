@@ -21,7 +21,11 @@
 
 
 var pg = require('pg');
+var Promise = require('es6-promise').Promise;
+
 var credentials = require('./database');
+
+var pool = new pg.Pool(credentials.poolConfig);
 
 /**
  * String to json converter
@@ -69,6 +73,8 @@ module.exports = {
      */
     generateTrips: function (userId) {
 
+
+        console.log('generating trips for ' + userId);
         // counter for number of points clustered in the stop period
         var stopNumber = 0;
 
@@ -84,22 +90,33 @@ module.exports = {
         // counter for number of points in trip
         var pointsInActiveTrip = 0;
 
-        pg.connect(credentials, function(err, client, done) {
-            var prioryQuery = client.query("select ap_get_stream_for_stop_detection as response from ap_get_stream_for_stop_detection("+userId+");");
+
+            pool.query("select get_stream_for_stop_detection as response from apiv2.get_stream_for_stop_detection("+userId+");",
+            function(err, result){
+
+
 
             // Gets the stream that has to be segmented
-            if (err) console.log(err);
-            prioryQuery.on('row', function (row) {
-                results.push(row);
-            });
+            for (var j in result.rows)
+                results.push(result.rows[j]);
 
-            prioryQuery.on('end', function(){
+            if (err){
+                console.log(err);
+            }
+            else{
                 var points = getJson(results[0].response);
 
+
                 if (points!=null)
+                {
                     var min = points.length;
+                    console.log('point support' + points.length);
+                }
                 else
+                {
                     var min =-1;
+                    console.log('no point support');
+                }
 
                 var skipOne = true;
 
@@ -107,12 +124,13 @@ module.exports = {
                 var centroidLon = 0;
 
                 for (var i = 0; i < min; i++) {
+
                     var currentLocation = extend(points[i],{});
+                    if (prevFrom == null) prevFrom = extend(currentLocation,{});
 
                     // accuracy filter for point
                     if (allConditionsAreMet(currentLocation)) {
                         pointsInActiveTrip++;
-                        if (prevFrom == null) prevFrom = extend(currentLocation,{});
                         if (prevLocation == null) {
                             prevLocation = extend(currentLocation, {});
                         }
@@ -144,16 +162,29 @@ module.exports = {
                                  if (!skipOne) {
 
                                      if (stopNumber >= 1) {
+
                                          // if the stop was actually important
                                          if ((endLocation.time_ - firstLocation.time_) >= 5 * 60000 && (pointsInActiveTrip >= 4)) {
                                              centroidLat = 0;
                                              centroidLon = 0;
                                              skipOne = true;
 
+                                             console.log('stop candidates');
+                                             console.log(firstLocation.id+' '+firstLocation.time_);
+                                             console.log(endLocation.id+' '+endLocation.time_);
+                                             console.log('end of stop candidates');
+
+
                                              var fromID = extend(firstLocation, {});
                                              var toID = extend(endLocation, {});
 
+
                                              prevTo = extend(fromID, {});
+
+                                             console.log('stop candidates from to');
+                                             console.log(prevFrom.id+' '+prevFrom.time_);
+                                             console.log(prevTo.id+' '+prevTo.time_);
+                                             console.log('end of stop candidates from to');
 
                                              var activeTrip = {};
                                              activeTrip.user_id = userId;
@@ -181,8 +212,12 @@ module.exports = {
                                              passiveTrip.duration_of_trip = 0;
                                              passiveTrip.number_of_triplegs = 1;
 
-                                             tripArray.push(activeTrip);
-                                             tripArray.push(passiveTrip);
+                                             // makes sure that none of the trips are generated while still in a stop period
+                                             if (activeTrip.from_time != activeTrip.to_time && passiveTrip.from_time != passiveTrip.to_time)
+                                             {
+                                                tripArray.push(activeTrip);
+                                                tripArray.push(passiveTrip);
+                                             }
 
                                              // insert active prevFrom -> prevTo
                                              //insert passive From -> To
@@ -207,11 +242,13 @@ module.exports = {
                         }
                     }
                 }
+                console.log('generated '+tripArray.length+' trips for user '+ userId);
                 generateSql(tripArray,userId);
-
+            };
             });
-
-        });
+    },
+    generateTriplegsExposed: function (userId) {
+        generateTriplegs(userId);
     }
 };
 
@@ -224,14 +261,16 @@ function generateTriplegs(userId) {
     var arrayOfTriplegs = [];
     var results = [];
 
-    pg.connect(credentials, function(err, client, done) {
-        var prioryQuery = client.query("select ap_get_stream_for_tripleg_detection as response from ap_get_stream_for_tripleg_detection("+userId+");");
+        pool.query("select get_stream_for_tripleg_detection as response from apiv2.get_stream_for_tripleg_detection("+userId+");", function(err, result){
 
-        prioryQuery.on('row', function (row) {
-            results.push(row);
-        });
+        for (var j in result.rows)
+            results.push(result.rows[j]);
 
-        prioryQuery.on('end', function(){
+            if (err){
+                console.log(err);
+            }
+            else
+            {
             var firstPoint = null;
             var lastPoint = null;
             var prevPoint = null;
@@ -263,15 +302,16 @@ function generateTriplegs(userId) {
                             tripleg.length_of_tripleg = 0;
                             tripleg.duration_of_tripleg = 0;
 
+                            arrayOfTriplegs.push(tripleg);
                             firstPoint = extend(points[i],{});
                         }
                     }
-
                     prevPoint = extend(points[i],{});
                 }
             }
+            console.log('generated '+arrayOfTriplegs.length+' triplegs for user '+ userId);
             generateTriplegSql(arrayOfTriplegs);
-        });
+        };
 
     });
 }
@@ -284,24 +324,30 @@ function generateTriplegSql(arrayOfTriplegs) {
 
     var triplegs = arrayOfTriplegs;
 
-    var sql ="INSERT INTO triplegs_inf(trip_id, user_id, from_point_id, to_point_id, from_time, to_time, type_of_tripleg, transportation_type , transition_poi_id, length_of_tripleg, duration_of_tripleg)";
+    var sql ="INSERT INTO apiv2.triplegs_inf(trip_id, user_id, from_time, to_time, type_of_tripleg)";
     var values = [];
-
+    var user_id = 0;
 
     for (var i=0; i<triplegs.length;i++){
+        user_id = triplegs[i].user_id;
         var object =[];
-        object.push("'"+triplegs[i].trip_id+"'","'"+triplegs[i].user_id+"'","'"+triplegs[i].from_point_id+"'","'"+triplegs[i].to_point_id+"'","'"+triplegs[i].from_time+"'","'"+triplegs[i].to_time+"'","'"+triplegs[i].type_of_tripleg+"'","'"+triplegs[i].transportation_type+"'","'"+triplegs[i].transition_poi_id+"'","'"+triplegs[i].length_of_tripleg+"'","'"+triplegs[i].duration_of_tripleg+"'");
+        object.push("'"+triplegs[i].trip_id+"'","'"+triplegs[i].user_id+"'","'"+triplegs[i].from_time+"'","'"+triplegs[i].to_time+"'","'"+triplegs[i].type_of_tripleg+"'");
         values.push("("+object.toString()+")");
     }
 
-    if (triplegs.length>0)
-    pg.connect(credentials, function(err, client, done) {
-        var prioryQuery = client.query(sql+ "values "+values.toString() , function(err) {
-            if (err) {
-                throw err;
+    console.log('executing triplegs -> ' + sql+ "values "+values.toString());
+
+    if (triplegs.length>0) {
+        pool.query(sql + "values " + values.toString(), function(err, result){
+
+            if (err){
+            console.log('error with sql function '+sql+" values "+values.toString());
+            console.log(err);
             }
+            else
+            console.log('generated triplegs for ' + user_id);
         });
-    });
+    }
 }
 
 /**
@@ -372,24 +418,27 @@ function toRad(Value)
  * @param userId
  */
 function generateSql(trips,userId) {
-    var sql ="INSERT INTO trips_inf(user_id, from_point_id, to_point_id, from_time, to_time, type_of_trip, purpose_id, destination_poi_id, length_of_trip, duration_of_trip, number_of_triplegs)";
+    var sql ="INSERT INTO apiv2.trips_inf(user_id, from_time, to_time, type_of_trip)";
     var values = [];
 
     for (var i=0; i<trips.length;i++){
         var object =[];
-        object.push("'"+trips[i].user_id+"'","'"+trips[i].from_point_id+"'","'"+trips[i].to_point_id+"'","'"+trips[i].from_time+"'","'"+trips[i].to_time+"'","'"+trips[i].type_of_trip+"'","'"+trips[i].purpose_id+"'","'"+trips[i].destination_poi_id+"'","'"+trips[i].length_of_trip+"'","'"+trips[i].duration_of_trip+"'","'"+trips[i].number_of_triplegs+"'");
+        object.push("'"+trips[i].user_id+"'","'"+trips[i].from_time+"'","'"+trips[i].to_time+"'","'"+trips[i].type_of_trip+"'");
         values.push("("+object.toString()+")");
     }
 
-    if (trips.length>0)
-    pg.connect(credentials, function(err, client, done) {
-        var prioryQuery = client.query(sql+ "values "+values.toString() , function(err) {
-            if (err) {
-                throw err;
-            }
-            else{
-                generateTriplegs(userId);
-            }
+    console.log('executing -> ' + sql+ " values "+values.toString());
+    if (trips.length>0) {
+        pool.query(sql + " values " + values.toString(), function (err, result){
+
+        if(err) {
+            console.log('error with sql function '+sql+" values "+values.toString());
+            console.log(err);
+        }
+        else
+            generateTriplegs(userId);
         });
-    });
+    }
 }
+
+module.exports.pool = pool;

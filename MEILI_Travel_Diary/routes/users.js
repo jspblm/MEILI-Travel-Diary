@@ -24,64 +24,29 @@ var router = express.Router();
 var passport = require('passport');
 var pg = require('pg');
 var credentials = require('./database');
-var segmenter = require('./segmenter.js');
-var myClient = new pg.Client(credentials);
+var segmenter = require('./segmenter');
+
+var myClient = new pg.Client(credentials.connectionString);
+var pool = segmenter.pool;
 
 //Connect to the database with one client specific to each user to avoid overflow of clients
 myClient.connect(function(err){
     if (err){
         return console.error('could not connect to postgres', err);
     }
-    else console.log('connection successufll');
+    else console.log('connection successfull');
 });
-
 
 /**
  * Checks if the user is logged in or not
  */
 router.get('/loggedin', function (req, res) {
     var checkMe=undefined;
+    console.log('request is authenticated');
+    console.log(req.isAuthenticated());
     if (req.user!=undefined) checkMe = req.user.userId +", "+req.user.userName;
+    console.log(checkMe);
     res.send(checkMe+"");
-});
-
-
-/**
- * Returns the response containing the trips that the user has to annotate
- * In - userid
- */
-router.post('/getAllUserTrips', function(req, res){
-    var results = [];
-    var userId = req.body.userId;
-
-    var prioryQuery = myClient.query("select ap_get_server_response_for_user as response from ap_get_server_response_for_user("+userId+");");
-
-        prioryQuery.on('row', function (row) {
-            results.push(row);
-        });
-
-        prioryQuery.on('end', function(){
-            return res.json(results[0]);
-        });
-});
-
-/**
- * Returns all the locations that are not part of an inferred trip for stop detection
- * In - userid
- */
-router.post('/getUnsegmentedStream', function(req, res){
-    var results = [];
-    var userId = req.user.userId;
-
-    var prioryQuery = myClient.query("select ap_get_stream_for_stop_detection as response from ap_get_stream_for_stop_detection("+userId+");");
-
-        prioryQuery.on('row', function (row) {
-            results.push(row);
-        });
-
-        prioryQuery.on('end', function(){
-            return res.json(results);
-        });
 });
 
 /**
@@ -90,7 +55,7 @@ router.post('/getUnsegmentedStream', function(req, res){
 router.post('/login', passport.authenticate('local'), function (req, res) {
 
     var user_id = {'userId':req.user.userId};
-
+    console.log(user_id);
     res.send(JSON.stringify(user_id));
 });
 
@@ -118,7 +83,9 @@ router.post('/loginUser', function(req, res) {
     // Grab data from http request
     var data = {username: req.body.username, password:req.body.password};
 
-    var prioryQuery = myClient.query("SELECT id FROM user_table where username = '" + data.username+"' and password='"+data.password+"' limit 1");
+    console.log('logging in user '+data.username);
+    var prioryQuery = myClient.query("SELECT login_user as id FROM raw_data.login_user( '" + data.username+"' ,'"+data.password+"')");
+    console.log(prioryQuery);
 
         prioryQuery.on('row', function (row) {
             alreadyExists=true;
@@ -127,9 +94,33 @@ router.post('/loginUser', function(req, res) {
         });
 
         prioryQuery.on('end', function(){
-            if (results.length==0) res.end("incorrect");
+
+            if (results.length==0) {
+                console.log('incorrect login for '+data.username);
+                res.end("incorrect");
+            }
             else return res.json(results);
         });
+});
+
+/**
+ * Mostly for debug purposes -> forces the generation of trips and triplegs
+ */
+router.get('/generateTripsAndTriplegsOfUsers', function(req, res){
+    var user_id= req.query.userId;
+    console.log('generating for user '+user_id);
+    segmenter.generateTrips(user_id);
+    return res.json('success');
+});
+
+/**
+ * Mostly for debug purposes -> forces the generation of trips and triplegs
+ */
+router.get('/generateTriplegsOfUsers', function(req, res){
+    var user_id= req.query.userId;
+    console.log('generating for user '+user_id);
+    segmenter.generateTriplegsExposed(user_id);
+    return res.json('success');
 });
 
 /**
@@ -164,78 +155,83 @@ router.post('/registerUser', function(req, res) {
     var alreadyExists = false;
     var numberOfRowsReturned = 0;
 
-    // Check if the username is already taken
-    var prioryQuery = myClient.query("SELECT id FROM user_table where username = '" + data.username+"'");
+    console.log('registering a new user'+ req.body.username);
 
-        prioryQuery.on('row', function (row) {
-            // The user name is already taken
-            numberOfRowsReturned++;
-            alreadyExists=true;
-        });
+            // Check if the username is already taken
+            pool.query("SELECT id FROM raw_data.user_table where username = '" + data.username+"'", function(err, result){
 
-        if (numberOfRowsReturned>0) alreadyExists=true;
+                if (err) {
+                    console.log('failed to register user')
+                    res.end("failed to register user");
+                }
 
-        prioryQuery.on('end', function(){
-            if (alreadyExists) {
-                // Inform the user that the username has been already taken
-                res.end("username taken");
-                return "username exists";
-            } else {
-                // SQL Query > Insert Data
-                // New user name
-                var query = myClient.query("INSERT INTO user_table(username, password, phone_model, phone_os) values($1, $2, $3, $4) RETURNING id",
-                    [data.username, data.password, data.phone_model, data.phone_os]);
+            for (var j in result.rows){
+                // The user name is already taken
+                numberOfRowsReturned++;
+                alreadyExists=true;
+            };
 
-                // Stream results back one row at a time
-                query.on('row', function (row) {
-                    results.push(row);
-                });
+            if (numberOfRowsReturned>0) alreadyExists=true;
 
-                query.on('end', function () {
-                    return res.json(results);
-                });
-            }});
+                if (alreadyExists) {
+                    console.log('username exists');
+                    // Inform the user that the username has been already taken
+                    res.end("username taken");
+                    return "username exists";
+                } else {
+                    // SQL Query > Insert Data
+                    // New user name
+                    console.log('inserting user in the database');
+                    var query = myClient.query("select register_user as id from raw_data.register_user($1, $2, $3, $4)",
+                        [data.username, data.password, data.phone_model, data.phone_os]);
+
+                    // Stream results back one row at a time
+                    query.on('row', function (row) {
+                        console.log('insert successfull');
+                        results.push(row);
+                    });
+
+                    query.on('end', function () {
+                        console.log(results);
+                        return res.json(results);
+                    });
+                }
+            });
 });
 
 /**
  * Description of how the user interactis via the client
  */
 router.post('/insertLog',  function(req, res) {
-
-    var data =  JSON.parse(req.body.dataToUpload);
-    var userId = JSON.parse(req.body.userId);
-
-    var sql ="INSERT INTO log_table(userid, log_date, log_message)";
-    var values = [];
-
-    for (var i=0; i<data.length;i++){
-        var object =[];
-        object.push("'"+userId+"'","'"+data[i].log_time+"'","'"+data[i].log_message+"'");
-        values.push("("+object.toString()+")");
-    }
-
-        var prioryQuery = myClient.query(sql+ "values "+values.toString() , function(err) {
-            if (err) {
-                throw err;
-            }
-            else{
-                res.end("success");
-            }
-        });
+    res.end("success");
+    return "success";
 });
 
 
 /**
  * Insert a location from the iOS devices
  */
-router.post('/insertLocationsIOS',  function(req, res) {
+router.post('/insertLocationsIOSTest',  function(req, res) {
 
+    console.log('started logging test ');
     var data =  JSON.parse(req.body.dataToUpload);
-    var sql = "INSERT INTO location_table (upload,  accuracy_, altitude_, bearing_, lat_, lon_, time_, speed_, satellites_, user_id, size, totalismoving, totalmax, totalmean, totalmin,"+
+
+    console.log(req.body.dataToUpload);
+
+    var user_ip = false;
+    if (req.headers['x-forwarded-for']) {
+        user_ip = req.headers['x-forwarded-for'].split(', ')[0];
+    };
+
+    user_ip = user_ip || req.connection.remoteAddress || req.socket.remoteAddress || req.connection.socket.remoteAddress;
+
+
+
+    var sql = "INSERT INTO raw_data.location_table (upload,  accuracy_, altitude_, bearing_, lat_, lon_, time_, speed_, satellites_, user_id, size, totalismoving, totalmax, totalmean, totalmin,"+
         "totalnumberofpeaks, totalnumberofsteps, totalstddev, "+
         "xismoving, xmaximum, xmean, xminimum, xnumberofpeaks, xstddev,"+
         "yismoving, ymax, ymean, ymin, ynumberofpeaks, ystddev, zismoving, zmax, zmean, zmin, znumberofpeaks, zstddev, "+
-        "provider"+
+        "provider, userip"+
         ")"; //+" VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37)";
 
     var values = [];
@@ -250,24 +246,98 @@ router.post('/insertLocationsIOS',  function(req, res) {
             "'"+data[i].totalNumberOfPeaks+"'", "'"+data[i].totalNumberOfSteps+"'", "'"+data[i].totalStdDev+"'",
             "'"+data[i].xIsMoving+"'", "'"+data[i].xMax+"'", "'"+data[i].xMean+"'", "'"+data[i].xMin+"'", "'"+data[i].xNumberOfPeaks+"'", "'"+data[i].xStdDev+"'",
             "'"+data[i].yIsMoving+"'", "'"+data[i].yMax+"'", "'"+data[i].yMean+"'", "'"+data[i].yMin+"'", "'"+data[i].yNumberOfPeask+"'", "'"+data[i].yStdDev+"'",
-            "'"+data[i].zIsMoving+"'", "'"+data[i].zMax+"'", "'"+data[i].zMean+"'", "'"+data[i].zMin+"'", "'"+data[i].zNumberOfPeaks+"'", "'"+data[i].zStdDev+"'", "'maybeGPS'");
+            "'"+data[i].zIsMoving+"'", "'"+data[i].zMax+"'", "'"+data[i].zMean+"'", "'"+data[i].zMin+"'", "'"+data[i].zNumberOfPeaks+"'", "'"+data[i].zStdDev+"'",
+            "'maybeGPS'", "'user_ip_test'");
         values.push("("+object.toString()+")");
     }
 
     if (data.length>0)
+    {
+        pool.query(sql + "values " + values.toString(), function(err, result){
 
-        var prioryQuery = myClient.query(sql+ "values "+values.toString() , function(err) {
-            if (err) {
+            if(err){
                 res.end("failure");
-                throw err;
+                console.log('error with sql function '+sql+ " values "+values.toString());
+                console.log(err);
             }
-            else{
+            else {
                 res.end("success");
                 // After a batch of insertions from the client, try and segment all residue data that are not already part of any trip
                 // NOTE - this will probably make nodeJS hang since it is an intensive operation, offload to client based segmentation as soon as a final segmentation strategy has been decided on.
                 segmenter.generateTrips(userId);
             }
         });
+
+        console.log('ended logging test 1');
+
+    }
+    else {
+        console.log('ended logging test 2');
+
+        res.end("failure");
+    }
+});
+
+/**
+ * Insert a location from the iOS devices
+ */
+router.post('/insertLocationsIOS',  function(req, res) {
+
+    var data =  JSON.parse(req.body.dataToUpload);
+
+    console.log(req.body.dataToUpload);
+
+    var sql = "INSERT INTO raw_data.location_table (upload,  accuracy_, altitude_, bearing_, lat_, lon_, time_, speed_, satellites_, user_id, size, totalismoving, totalmax, totalmean, totalmin,"+
+        "totalnumberofpeaks, totalnumberofsteps, totalstddev, "+
+        "xismoving, xmaximum, xmean, xminimum, xnumberofpeaks, xstddev,"+
+        "yismoving, ymax, ymean, ymin, ynumberofpeaks, ystddev, zismoving, zmax, zmean, zmin, znumberofpeaks, zstddev, "+
+        "provider, user_ip"+
+        ")"; //+" VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37)";
+
+    var user_ip = false;
+    if (req.headers['x-forwarded-for']) {
+        user_ip = req.headers['x-forwarded-for'].split(', ')[0];
+    };
+
+    if (req.connection) user_ip = user_ip || req.connection.remoteAddress;
+    if (req.socket) user_ip = user_ip || req.socket.remoteAddress;
+    if (req.connection.socket) user_ip = user_ip || req.connection.socket.remoteAddress;
+
+    console.log('request with ip '+user_ip);
+    var values = [];
+    var userId = 0;
+
+    for (var i=0; i<data.length;i++){
+        var object = [];
+        userId = data[i].userid;
+        object.push("'"+data[i].upload+"'", "'"+data[i].accuracy+"'", "'"+data[i].altitude+"'", "'"+data[i].bearing+"'", "'"+data[i].latitude+"'", "'"+data[i].longitude+"'",
+            "'"+data[i].time_+"000'", "'"+data[i].speed_+"'", "'"+data[i].satellites_+"'", "'"+data[i].userid+"'",
+            "'"+data[i].size+"'", "'"+data[i].totalIsMoving+"'", "'"+data[i].totalMax+"'", "'"+data[i].totalMean+"'", "'"+data[i].totalMin+"'",
+            "'"+data[i].totalNumberOfPeaks+"'", "'"+data[i].totalNumberOfSteps+"'", "'"+data[i].totalStdDev+"'",
+            "'"+data[i].xIsMoving+"'", "'"+data[i].xMax+"'", "'"+data[i].xMean+"'", "'"+data[i].xMin+"'", "'"+data[i].xNumberOfPeaks+"'", "'"+data[i].xStdDev+"'",
+            "'"+data[i].yIsMoving+"'", "'"+data[i].yMax+"'", "'"+data[i].yMean+"'", "'"+data[i].yMin+"'", "'"+data[i].yNumberOfPeask+"'", "'"+data[i].yStdDev+"'",
+            "'"+data[i].zIsMoving+"'", "'"+data[i].zMax+"'", "'"+data[i].zMean+"'", "'"+data[i].zMin+"'", "'"+data[i].zNumberOfPeaks+"'", "'"+data[i].zStdDev+"'", "'maybeGPS'"
+            ,"'"+user_ip+"'");
+        values.push("("+object.toString()+")");
+    }
+
+    if (data.length>0)
+    {
+        pool.query(sql + "values " + values.toString(), function(err, result){
+
+            if(err){
+                    res.end("failure");
+                    console.log('error with sql function '+sql+ " values "+values.toString());
+                    console.log(err);
+            }
+            else {
+                    res.end("success");
+                    // After a batch of insertions from the client, try and segment all residue data that are not already part of any trip
+                    // NOTE - this will probably make nodeJS hang since it is an intensive operation, offload to client based segmentation as soon as a final segmentation strategy has been decided on.
+                    segmenter.generateTrips(userId);
+            }
+    });
+    }
     else res.end("failure");
 });
 
@@ -278,7 +348,7 @@ router.post('/insertLocationsAndroid',  function(req, res) {
     var data =  JSON.parse(req.body.embeddedLocations_);
 
     var userId = 0;
-    var sql = "INSERT INTO location_table (upload,  accuracy_, altitude_, bearing_, lat_, lon_, time_, speed_, satellites_, user_id, size, totalismoving, totalmax, totalmean, totalmin,"+
+    var sql = "INSERT INTO raw_data.location_table (upload,  accuracy_, altitude_, bearing_, lat_, lon_, time_, speed_, satellites_, user_id, size, totalismoving, totalmax, totalmean, totalmin,"+
         "totalnumberofpeaks, totalnumberofsteps, totalstddev, "+
         "xismoving, xmaximum, xmean, xminimum, xnumberofpeaks, xstddev,"+
         "yismoving, ymax, ymean, ymin, ynumberofpeaks, ystddev, zismoving, zmax, zmean, zmin, znumberofpeaks, zstddev, "+
@@ -301,91 +371,24 @@ router.post('/insertLocationsAndroid',  function(req, res) {
             "'"+accelerometerObject.zIsMoving+"'", "'"+accelerometerObject.zMax+"'", "'"+accelerometerObject.zMean+"'", "'"+accelerometerObject.zMin+"'", "'"+accelerometerObject.zNumberOfPeaks+"'", "'"+accelerometerObject.zStdDev+"'", "'"+locationObject.provider+"'");
         values.push("("+object.toString()+")");
     }
-    if (data.length>0)
-        var prioryQuery = myClient.query(sql+ "values "+values.toString() , function(err) {
-            if (err) {
-                res.end("failure");
-                throw err;
-            }
-            else{
-                res.end("OK");
-                // After a batch of insertions from the client, try and segment all residue data that are not already part of any trip
-                // NOTE - this will probably make nodeJS hang since it is an intensive operation, offload to client based segmentation as soon as a final segmentation strategy has been decided on.
-                segmenter.generateTrips(userId);
-            }
-        });
+
+    if (data.length>0) {
+
+                pool.query(sql + "values " + values.toString(), function(err,result) {
+
+
+                    if (err) {
+                        res.end("failure");
+                        console.log('error with sql function ' + sql + " values " + values.toString());
+                        console.log(err);
+                    }
+                    else {
+                        res.end("OK");
+                        segmenter.generateTrips(userId);
+                    }
+                });
+        }
     else res.end("failure");
-});
-
-/**
- * Segmenter inferred a trip from the stream of locations and inserts it in the database
- */
-router.post('/insertInferredTrips',  function(req, res) {
-    var trips =  req.body.tripArray;
-    var sql ="INSERT INTO trips_inf(user_id, from_point_id, to_point_id, from_time, to_time, type_of_trip, purpose_id, destination_poi_id, length_of_trip, duration_of_trip, number_of_triplegs)";
-    var values = [];
-
-    for (var i=0; i<trips.length;i++){
-        var object =[];
-        object.push("'"+trips[i].user_id+"'","'"+trips[i].from_point_id+"'","'"+trips[i].to_point_id+"'","'"+trips[i].from_time+"'","'"+trips[i].to_time+"'","'"+trips[i].type_of_trip+"'","'"+trips[i].purpose_id+"'","'"+trips[i].destination_poi_id+"'","'"+trips[i].length_of_trip+"'","'"+trips[i].duration_of_trip+"'","'"+trips[i].number_of_triplegs+"'");
-        values.push("("+object.toString()+")");
-    }
-
-    console.log(sql+ "values "+values.toString());
-    if (data.length>0)
-        var prioryQuery = myClient.query(sql+ "values "+values.toString() , function(err) {
-            if (err) {
-                 res.end("failure "+err);
-                throw err;
-            }
-            else{
-                 res.end("success");
-            }
-    });
-});
-
-/**
- * Gets the stream associated with a newly generated trip and detects triplegs
- */
-router.post('/getTransportationSegmentsStream', function(req, res){
-
-    var results = [];
-    var userId = req.user.userId;
-        var prioryQuery = myClient.query("select ap_get_stream_for_tripleg_detection as response from ap_get_stream_for_tripleg_detection("+userId+");");
-
-        prioryQuery.on('row', function (row) {
-            results.push(row);
-        });
-
-        prioryQuery.on('end', function(){
-            return res.json(results);
-    });
-
-});
-
-
-/**
- * Inserts the inferred triplegs into the database
- */
-router.post('/insertInferredTriplegs',  function(req, res) {
-
-    var triplegs =  req.user.triplegArray;
-    var sql ="INSERT INTO triplegs_inf(trip_id, user_id, from_point_id, to_point_id, from_time, to_time, type_of_tripleg, transportation_type , transition_poi_id, length_of_tripleg, duration_of_tripleg)";
-    var values = [];
-    for (var i=0; i<triplegs.length;i++){
-        var object =[];
-        object.push("'"+triplegs[i].trip_id+"'","'"+triplegs[i].user_id+"'","'"+triplegs[i].from_point_id+"'","'"+triplegs[i].to_point_id+"'","'"+triplegs[i].from_time+"'","'"+triplegs[i].to_time+"'","'"+triplegs[i].type_of_tripleg+"'","'"+triplegs[i].transportation_type+"'","'"+triplegs[i].transition_poi_id+"'","'"+triplegs[i].length_of_tripleg+"'","'"+triplegs[i].duration_of_tripleg+"'");
-        values.push("("+object.toString()+")");
-    }
-        var prioryQuery = myClient.query(sql+ "values "+values.toString() , function(err) {
-            if (err) {
-                 res.end("failure "+err);
-                throw err;
-            }
-            else{
-                 res.end("success");
-            }
-         });
 });
 
 module.exports = router;

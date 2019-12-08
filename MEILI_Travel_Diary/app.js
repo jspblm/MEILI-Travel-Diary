@@ -34,7 +34,13 @@ var myClient = reqClient.client;
 
 var routes = require('./routes/index');
 var users = require('./routes/users');
+
 var api = require('./routes/api');
+
+var testEndPoint = require('./routes/apiv2/tests');
+var tripEndPoint = require('./routes/apiv2/trips');
+var triplegsEndPoint = require('./routes/apiv2/triplegs');
+var poisEndPoint = require('./routes/apiv2/pois');
 
 var passport = require('passport');
 var LocalStrategy = require('passport-local').Strategy;
@@ -44,6 +50,8 @@ var LocalStrategy = require('passport-local').Strategy;
  *
  **/
 
+var segmenter = require('./routes/segmenter.js');
+
 // Login Function
 // Defines the strategy to be used by PassportJS
 passport.use(new LocalStrategy(
@@ -51,7 +59,7 @@ passport.use(new LocalStrategy(
         var results = [];
 
         //call database for login
-        var prioryQuery = myClient.query("SELECT id FROM user_table where username = '" + username+"' and password='"+password+"' limit 1");
+        var prioryQuery = myClient.query("SELECT login_user as id FROM raw_data.login_user('" + username+"', '"+password+"')");
 
         prioryQuery.on('row', function (row) {
                 // push retrieved id from database
@@ -59,7 +67,10 @@ passport.use(new LocalStrategy(
             });
 
             prioryQuery.on('end', function(){
-                if (results[0]!=undefined){
+
+                console.log(results);
+
+                if (results[0].id!=null && results[0].id!=undefined){
                     //retrieved id successfully
                     done(null, {userId: results[0].id, userName: username});
                 }
@@ -93,7 +104,6 @@ var auth = function (req, res, next) {
     }
 };
 
-
 var app = express();
 app.use(bodyParser.json({limit: '150mb'}));
 app.use(bodyParser.urlencoded({extended: true, limit: '150mb'}));
@@ -110,7 +120,7 @@ app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // TODO - figure out if this is needed
-app.use(session({secret: 'blahblah',resave: true,
+    app.use(session({secret: 'blahblah',resave: false,
     saveUninitialized: true}));
 
 // declare and initialize passport
@@ -125,8 +135,16 @@ app.use('/users', users);
 // only accessible after doing the handshake
 app.use('/api', auth,api);
 
+// only accessible after doing the handshake
+app.use('/apiv2/trips', auth, tripEndPoint);
+app.use('/apiv2/triplegs', auth, triplegsEndPoint);
+app.use('/apiv2/pois', auth, poisEndPoint);
+app.use('/apiv2/tests', auth, testEndPoint);
+
 // default fallback
 app.use('/', routes);
+
+app.disable('etag');
 
 // development error handler
 // will print stacktrace
